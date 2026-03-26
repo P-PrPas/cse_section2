@@ -28,7 +28,7 @@ class ScannerListenerThread(QThread):
 
     code_scanned = pyqtSignal(str)
 
-    def __init__(self, url_pattern: str = r"^https?://.+", parent=None):
+    def __init__(self, url_pattern: str = r"^\d{13}$", parent=None):
         super().__init__(parent)
         self._buffer = []
         self._url_pattern = url_pattern
@@ -70,10 +70,10 @@ class ScannerListenerThread(QThread):
             return
 
         if re.match(self._url_pattern, scanned_text):
-            logger.info("Valid URL scanned: %s", scanned_text)
+            logger.info("Valid National ID scanned: %s", scanned_text)
             self.code_scanned.emit(scanned_text)
         else:
-            logger.warning("Scanned data is not a valid URL: '%s'", scanned_text)
+            logger.warning("Scanned data is not a valid National ID: '%s'", scanned_text)
 
     def stop(self):
         """Stop the scanner listener thread."""

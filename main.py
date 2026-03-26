@@ -40,7 +40,7 @@ def load_config(config_path: str = "config.json") -> dict:
         "camera_index": 0,
         "match_threshold": 0.35,
         "http_timeout": 5,
-        "url_pattern": r"^https?://.+",
+        "url_pattern": r"^\d{13}$",
         "auto_reset_delay": 3,
         "model_name": "VGG-Face",
         "clahe_clip_limit": 2.0,

@@ -19,12 +19,11 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtMultimedia import QCameraInfo
 
 from modules.face_verifier import FaceVerifier
-from modules.document_fetcher import (
-    fetch_document, InvalidURLError, FetchTimeoutError, ImageDecodeError,
-    PDFRenderError,
-)
+from modules.ocsc_scraper import OcscScraperThread, ScraperStatus
 from modules.image_enhance import apply_clahe
 from modules.scanner_listener import ScannerListenerThread
+from dotenv import load_dotenv
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +38,10 @@ class VerificationWorker(QThread):
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
 
-    def __init__(self, url: str, webcam_frame: np.ndarray, config: dict,
+    def __init__(self, digital_img: np.ndarray, webcam_frame: np.ndarray, config: dict,
                  face_verifier: FaceVerifier, parent=None):
         super().__init__(parent)
-        self.url = url
+        self.digital_img = digital_img
         self.webcam_frame = webcam_frame.copy()
         self.config = config
         self.face_verifier = face_verifier
@@ -50,12 +49,9 @@ class VerificationWorker(QThread):
     def run(self):
         try:
             start = time.time()
-            digital_img = fetch_document(
-                self.url,
-                timeout=self.config.get("http_timeout", 5),
-                url_pattern=self.config.get("url_pattern", r"^https?://.+")
-            )
-            
+            if self.digital_img is None:
+                raise ValueError("No digital image provided.")
+                
             enhanced_frame = apply_clahe(
                 self.webcam_frame,
                 clip_limit=self.config.get("clahe_clip_limit", 2.0),
@@ -63,7 +59,7 @@ class VerificationWorker(QThread):
             )
             
             enhanced_digital = apply_clahe(
-                digital_img,
+                self.digital_img,
                 clip_limit=self.config.get("clahe_clip_limit", 2.0),
                 grid_size=tuple(self.config.get("clahe_grid_size", [8, 8]))
             )
@@ -79,16 +75,6 @@ class VerificationWorker(QThread):
             result["webcam_image"] = result.get("img_webcam_debug", enhanced_frame)
             self.finished.emit(result)
 
-        except InvalidURLError as e:
-            self.error.emit(f"Invalid URL:\n{str(e)}")
-        except FetchTimeoutError as e:
-            self.error.emit(f"Download failed:\n{str(e)}")
-        except ImageDecodeError as e:
-            self.error.emit(f"Not an image:\n{str(e)}")
-        except PDFRenderError as e:
-            self.error.emit(f"PDF render failed:\n{str(e)}")
-        except ValueError as e:
-            self.error.emit(str(e))
         except Exception as e:
             logger.error("Unexpected error: %s\n%s", str(e), traceback.format_exc())
             self.error.emit(f"Unexpected error:\n{str(e)}")
@@ -100,6 +86,7 @@ class MainWindow(QMainWindow):
         self.config = config
         self.cap = None
         self.scanner_thread = None
+        self.scraper_thread = None
         self.worker = None
         self._processing = False
         self._current_frame = None
@@ -118,6 +105,7 @@ class MainWindow(QMainWindow):
 
         self._init_ui()
         self._init_camera()
+        self._init_scraper()
         self._init_scanner()
 
     def _init_ui(self):
@@ -428,25 +416,53 @@ class MainWindow(QMainWindow):
         )
         self.webcam_label.setPixmap(pixmap)
 
+    def _init_scraper(self):
+        load_dotenv()
+        user = os.environ.get("OCSC_USER", "eexamphoto")
+        pwd = os.environ.get("OCSC_PASSWORD", "zLc3R/IZNfapHG5Idk2T3A==")
+        self.scraper_thread = OcscScraperThread(user, pwd, parent=self)
+        self.scraper_thread.status_changed.connect(self._on_scraper_status_changed)
+        self.scraper_thread.search_finished.connect(self._on_scraper_finished)
+        self.scraper_thread.start()
+
+    @pyqtSlot(str, str)
+    def _on_scraper_status_changed(self, status: str, msg: str):
+        if status in [ScraperStatus.STARTING, ScraperStatus.LOGGING_IN]:
+            self.doc_stack.setCurrentIndex(1)
+            self._set_status(
+                "SYSTEM INIT", msg, "⚙️",
+                "background-color: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 16px;",
+                "background-color: #0F172A; border-top: 1px solid #1E293B;",
+                "#38BDF8"
+            )
+        elif status == ScraperStatus.READY:
+            if not self._processing:
+                self._reset_to_standby()
+        elif status == ScraperStatus.FATAL:
+            self._show_error(f"Scraper Fatal Error: {msg}")
+
     def _init_scanner(self):
-        url_pattern = self.config.get("url_pattern", r"^https?://.+")
+        url_pattern = self.config.get("url_pattern", r"^\d{13}$")
         self.scanner_thread = ScannerListenerThread(url_pattern=url_pattern, parent=self)
         self.scanner_thread.code_scanned.connect(self._on_code_scanned)
         self.scanner_thread.start()
 
     @pyqtSlot(str)
-    def _on_code_scanned(self, url: str):
+    def _on_code_scanned(self, national_id: str):
         if self._processing: return
         if self.face_verifier is None:
             self._show_error("AI model not ready. Please check model files.")
             return
+        if self.scraper_thread is None or not self.scraper_thread.isRunning():
+            self._show_error("Web Scraper is not running.")
+            return
 
         self._processing = True
-        logger.info("QR scanned: %s", url)
+        logger.info("National ID scanned: %s", national_id)
 
         self.doc_stack.setCurrentIndex(1)
         self._set_status(
-            "PROCESSING...", "Analyzing document and facial geometry...", "⏳",
+            "FETCHING DATA...", f"Searching OCSC for ID: {national_id}", "⏳",
             "background-color: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 16px;",
             "background-color: #0F172A; border-top: 1px solid #1E293B;",
             "#38BDF8"
@@ -457,7 +473,23 @@ class MainWindow(QMainWindow):
             self._show_error("Camera frame not available. Check connection.")
             return
 
-        self.worker = VerificationWorker(url, self._current_frame, self.config, self.face_verifier, self)
+        # Queue the search to playwright
+        self.scraper_thread.enqueue_search(national_id)
+
+    @pyqtSlot(str, object, str)
+    def _on_scraper_finished(self, nat_id: str, img: np.ndarray, err: str):
+        if err or img is None:
+            self._show_error(err or "Failed to retrieve image form OCSC.")
+            return
+
+        self._set_status(
+            "VERIFYING...", "Analyzing facial geometry against OCSC photo...", "🔍",
+            "background-color: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 16px;",
+            "background-color: #0F172A; border-top: 1px solid #1E293B;",
+            "#10B981"
+        )
+
+        self.worker = VerificationWorker(img, self._current_frame, self.config, self.face_verifier, self)
         self.worker.finished.connect(self._on_verification_done)
         self.worker.error.connect(self._show_error)
         self.worker.start()
@@ -567,6 +599,9 @@ class MainWindow(QMainWindow):
         if self.scanner_thread:
             self.scanner_thread.stop()
             self.scanner_thread.wait(2000)
+        if self.scraper_thread:
+            self.scraper_thread.stop()
+            self.scraper_thread.wait(3000)
         if self.worker and self.worker.isRunning():
             self.worker.terminate()
             self.worker.wait(1000)
