@@ -14,7 +14,7 @@ from PyQt5.QtCore import (Qt, QTimer, QThread, pyqtSignal, pyqtSlot)
 from PyQt5.QtGui import QImage, QPixmap, QFont, QColor
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QLabel, QVBoxLayout, QHBoxLayout,
-    QFrame, QGraphicsDropShadowEffect, QStackedWidget, QComboBox
+    QFrame, QGraphicsDropShadowEffect, QStackedWidget, QComboBox, QPushButton
 )
 from PyQt5.QtMultimedia import QCameraInfo
 
@@ -92,6 +92,8 @@ class MainWindow(QMainWindow):
         self._current_frame = None
         self._reticle_color = (248, 189, 56) # Sky Blue BGR Default
         self.camera_timer = None
+        self._camera_rotation_deg = 0
+        self._last_sound_at = 0.0
 
         self.setWindowTitle("EDFVS — Premium Edition")
         self.setMinimumSize(1200, 800)
@@ -183,6 +185,24 @@ class MainWindow(QMainWindow):
         ch_title.setStyleSheet("color: #E2E8F0; font-weight: bold; font-size: 14px; border: none;")
         ch_layout.addWidget(ch_title)
         ch_layout.addStretch()
+
+        self.rotate_cam_btn = QPushButton("⟳ Rotate")
+        self.rotate_cam_btn.setCursor(Qt.PointingHandCursor)
+        self.rotate_cam_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #334155;
+                color: #E2E8F0;
+                border: 1px solid #475569;
+                border-radius: 6px;
+                padding: 4px 10px;
+                font-family: 'Segoe UI';
+                font-size: 11px;
+            }
+            QPushButton:hover { background-color: #3b4b63; }
+            QPushButton:pressed { background-color: #1f2a3a; }
+        """)
+        self.rotate_cam_btn.clicked.connect(self._rotate_camera)
+        ch_layout.addWidget(self.rotate_cam_btn)
 
         self.camera_combo = QComboBox()
         self.camera_combo.setStyleSheet("""
@@ -395,8 +415,9 @@ class MainWindow(QMainWindow):
         if not ret:
             return
 
-        self._current_frame = frame.copy()
-        display_frame = frame.copy()
+        rotated = self._apply_camera_rotation(frame)
+        self._current_frame = rotated.copy()
+        display_frame = rotated.copy()
         
         if self.face_verifier is not None:
             try:
@@ -415,6 +436,22 @@ class MainWindow(QMainWindow):
             Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
         self.webcam_label.setPixmap(pixmap)
+
+    def _apply_camera_rotation(self, frame: np.ndarray) -> np.ndarray:
+        if frame is None:
+            return frame
+        deg = int(self._camera_rotation_deg) % 360
+        if deg == 90:
+            return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        if deg == 180:
+            return cv2.rotate(frame, cv2.ROTATE_180)
+        if deg == 270:
+            return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return frame
+
+    def _rotate_camera(self):
+        self._camera_rotation_deg = (int(self._camera_rotation_deg) + 90) % 360
+        logger.info("Camera rotation set to %d degrees.", self._camera_rotation_deg)
 
     def _init_scraper(self):
         load_dotenv()
@@ -516,6 +553,7 @@ class MainWindow(QMainWindow):
             self.doc_stack.setCurrentIndex(2)
 
         if error_msg:
+            self._play_feedback_sound("alert")
             self._reticle_color = (68, 68, 239) # Red
             self._set_status(
                 "ERROR", str(error_msg), "⚠️",
@@ -525,6 +563,8 @@ class MainWindow(QMainWindow):
             )
             self.score_val.setStyleSheet("color: #F87171; background: transparent; border: none;")
         elif is_match:
+            if pct < 80.0:
+                self._play_feedback_sound("warning")
             self._reticle_color = (129, 185, 16) # Emerald
             self._set_status(
                 "MATCH VERIFIED", "Identity confirmed. Proceed to examination room.", "✅",
@@ -534,6 +574,7 @@ class MainWindow(QMainWindow):
             )
             self.score_val.setStyleSheet("color: #34D399; background: transparent; border: none;")
         else:
+            self._play_feedback_sound("alert")
             self._reticle_color = (68, 68, 239) # Red
             self._set_status(
                 "MISMATCH ALERT", "Identity cannot be verified. Please contact supervisor.", "❌",
@@ -548,6 +589,7 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str)
     def _show_error(self, message: str):
+        self._play_feedback_sound("alert")
         self._reticle_color = (68, 68, 239)
         self._set_status(
             "ERROR", str(message), "⚠️",
@@ -557,6 +599,37 @@ class MainWindow(QMainWindow):
         )
         reset_delay = self.config.get("auto_reset_delay", 3)
         QTimer.singleShot(int(reset_delay * 1000), self._reset_to_standby)
+
+    def _play_feedback_sound(self, kind: str):
+        """
+        kind:
+          - 'warning': score < 80% but still MATCH
+          - 'alert': mismatch / below threshold / error
+        """
+        now = time.time()
+        min_gap = float(self.config.get("sound_min_gap_sec", 0.75))
+        if now - float(self._last_sound_at) < min_gap:
+            return
+        self._last_sound_at = now
+
+        try:
+            import winsound
+        except Exception:
+            return
+
+        try:
+            if kind == "warning":
+                # Gentle double-beep
+                winsound.Beep(880, 90)
+                winsound.Beep(880, 90)
+            else:
+                # Clear alert
+                winsound.MessageBeep(winsound.MB_ICONHAND)
+                winsound.Beep(1200, 140)
+                winsound.Beep(900, 160)
+        except Exception:
+            # Never let sound failures break the verification flow
+            return
 
     def _reset_to_standby(self):
         self._processing = False
