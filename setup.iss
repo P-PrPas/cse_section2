@@ -8,7 +8,7 @@
 
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application.
-AppId={{EDFVS-7A8B9C0D-1E2F-3G4H-5I6J-7K8L9M0N1O2P}
+AppId=EDFVS
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
