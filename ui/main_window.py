@@ -38,11 +38,12 @@ class VerificationWorker(QThread):
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
 
-    def __init__(self, digital_img: np.ndarray, webcam_frame: np.ndarray, config: dict,
+    def __init__(self, digital_img: np.ndarray, webcam_frame: np.ndarray, local_img: np.ndarray, config: dict,
                  face_verifier: FaceVerifier, parent=None):
         super().__init__(parent)
         self.digital_img = digital_img
         self.webcam_frame = webcam_frame.copy()
+        self.local_img = local_img.copy() if local_img is not None else None
         self.config = config
         self.face_verifier = face_verifier
 
@@ -64,15 +65,28 @@ class VerificationWorker(QThread):
                 grid_size=tuple(self.config.get("clahe_grid_size", [8, 8]))
             )
 
+            enhanced_local = None
+            if self.local_img is not None:
+                enhanced_local = apply_clahe(
+                    self.local_img,
+                    clip_limit=self.config.get("clahe_clip_limit", 2.0),
+                    grid_size=tuple(self.config.get("clahe_grid_size", [8, 8]))
+                )
+
             threshold = self.config.get("match_threshold", 0.35)
             result = self.face_verifier.verify(
-                enhanced_digital, enhanced_frame, threshold=threshold
+                enhanced_digital, enhanced_frame, img_local=enhanced_local, threshold=threshold
             )
 
             elapsed = time.time() - start
             result["elapsed"] = round(elapsed, 2)
             result["digital_image"] = result.get("img_digital_debug", enhanced_digital)
             result["webcam_image"] = result.get("img_webcam_debug", enhanced_frame)
+            result["local_image"] = result.get("img_local_debug", enhanced_local)
+            
+            # Additional flags to make downstream processing easier
+            result["has_local"] = enhanced_local is not None
+            
             self.finished.emit(result)
 
         except Exception as e:
@@ -248,7 +262,7 @@ class MainWindow(QMainWindow):
         doc_header.setFixedHeight(55)
         dh_layout = QHBoxLayout(doc_header)
         dh_layout.setContentsMargins(20, 0, 20, 0)
-        dh_title = QLabel("📄 Digital Source")
+        dh_title = QLabel("📄 Web Source")
         dh_title.setStyleSheet("color: #E2E8F0; font-weight: bold; font-size: 14px; border: none;")
         dh_badge = QLabel("from QR Code")
         dh_badge.setStyleSheet("color: #94A3B8; background-color: #334155; padding: 4px 8px; border-radius: 4px; font-family: monospace; font-size: 11px; border: none;")
@@ -306,6 +320,74 @@ class MainWindow(QMainWindow):
         doc_layout.addWidget(self.doc_stack, 1)
         add_shadow(self.doc_card, 40, 15, 60)
         content_layout.addWidget(self.doc_card, 1)
+
+        # Right-most / Local Image Card
+        self.local_card = QWidget()
+        self.local_card.setObjectName("Card")
+        local_layout = QVBoxLayout(self.local_card)
+        local_layout.setContentsMargins(0, 0, 0, 0)
+        local_layout.setSpacing(0)
+
+        local_header = QWidget()
+        local_header.setObjectName("CardHeader")
+        local_header.setFixedHeight(55)
+        lh_layout = QHBoxLayout(local_header)
+        lh_layout.setContentsMargins(20, 0, 20, 0)
+        lh_title = QLabel("📂 Database")
+        lh_title.setStyleSheet("color: #E2E8F0; font-weight: bold; font-size: 14px; border: none;")
+        lh_badge = QLabel("Local File")
+        lh_badge.setStyleSheet("color: #94A3B8; background-color: #334155; padding: 4px 8px; border-radius: 4px; font-family: monospace; font-size: 11px; border: none;")
+        lh_layout.addWidget(lh_title)
+        lh_layout.addStretch()
+        lh_layout.addWidget(lh_badge)
+        local_layout.addWidget(local_header)
+
+        self.local_stack = QStackedWidget()
+        
+        # Local Idle State
+        lcl_idle = QWidget()
+        lcl_idle_l = QVBoxLayout(lcl_idle)
+        lcl_idle_l.setAlignment(Qt.AlignCenter)
+        lcl_idle_icon = QLabel("🔲")
+        lcl_idle_icon.setFont(QFont("Segoe UI", 48))
+        lcl_idle_icon.setAlignment(Qt.AlignCenter)
+        lcl_idle_icon.setStyleSheet("color: #475569; background: transparent; border: none;")
+        lcl_idle_text = QLabel("Waiting for File Scan")
+        lcl_idle_text.setFont(QFont("Segoe UI", 16))
+        lcl_idle_text.setStyleSheet("color: #94A3B8; background: transparent; border: none;")
+        lcl_idle_text.setAlignment(Qt.AlignCenter)
+        lcl_idle_l.addWidget(lcl_idle_icon)
+        lcl_idle_l.addWidget(lcl_idle_text)
+
+        # Local Error State
+        lcl_err = QWidget()
+        lcl_err_l = QVBoxLayout(lcl_err)
+        lcl_err_l.setAlignment(Qt.AlignCenter)
+        lcl_err_icon = QLabel("⚠️")
+        lcl_err_icon.setFont(QFont("Segoe UI", 48))
+        lcl_err_icon.setAlignment(Qt.AlignCenter)
+        lcl_err_icon.setStyleSheet("background: transparent; border: none;")
+        self.lcl_err_text = QLabel("File Not Found")
+        self.lcl_err_text.setFont(QFont("Segoe UI", 16))
+        self.lcl_err_text.setStyleSheet("color: #F87171; background: transparent; border: none;")
+        self.lcl_err_text.setAlignment(Qt.AlignCenter)
+        lcl_err_l.addWidget(lcl_err_icon)
+        lcl_err_l.addWidget(self.lcl_err_text)
+        
+        # Local Loaded State
+        self.local_label = QLabel()
+        self.local_label.setAlignment(Qt.AlignCenter)
+        self.local_label.setStyleSheet("background-color: #0F172A; border-bottom-left-radius: 16px; border-bottom-right-radius: 16px;")
+
+        self.local_stack.addWidget(lcl_idle)
+        self.local_stack.addWidget(lcl_err)
+        self.local_stack.addWidget(self.local_label)
+        self.local_stack.setStyleSheet("background: transparent; border: none;")
+        
+        local_layout.addWidget(self.local_stack, 1)
+        add_shadow(self.local_card, 40, 15, 60)
+        content_layout.addWidget(self.local_card, 1)
+        
         main_layout.addWidget(content_widget, 1)
 
         # ── 3. Bottom Status Bar ──
@@ -334,17 +416,42 @@ class MainWindow(QMainWindow):
         sp_layout.addLayout(status_text_box)
         sp_layout.addStretch()
 
-        self.score_box = QVBoxLayout()
+        self.score_box = QHBoxLayout()
+        self.score_box.setSpacing(30)
         self.score_box.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
-        score_lbl = QLabel("CONFIDENCE SCORE")
-        score_lbl.setStyleSheet("color: #94A3B8; font-family: monospace; font-size: 12px; border: none; background: transparent;")
-        score_lbl.setAlignment(Qt.AlignRight)
-        self.score_val = QLabel("--%")
-        self.score_val.setFont(QFont("Segoe UI", 28, QFont.Bold))
-        self.score_val.setStyleSheet("color: white; border: none; background: transparent;")
-        self.score_val.setAlignment(Qt.AlignRight)
-        self.score_box.addWidget(score_lbl)
-        self.score_box.addWidget(self.score_val)
+        
+        # Camera Score Box
+        cam_score_vbox = QVBoxLayout()
+        cam_score_lbl = QLabel("CAMERA MATCH")
+        cam_score_lbl.setStyleSheet("color: #94A3B8; font-family: monospace; font-size: 12px; border: none; background: transparent;")
+        cam_score_lbl.setAlignment(Qt.AlignRight)
+        self.cam_score_val = QLabel("--%")
+        self.cam_score_val.setFont(QFont("Segoe UI", 28, QFont.Bold))
+        self.cam_score_val.setStyleSheet("color: white; border: none; background: transparent;")
+        self.cam_score_val.setAlignment(Qt.AlignRight)
+        cam_score_vbox.addWidget(cam_score_lbl)
+        cam_score_vbox.addWidget(self.cam_score_val)
+        
+        # Divider
+        divider = QFrame()
+        divider.setFrameShape(QFrame.VLine)
+        divider.setStyleSheet("color: #475569;")
+        
+        # Local Score Box
+        loc_score_vbox = QVBoxLayout()
+        loc_score_lbl = QLabel("FILE MATCH")
+        loc_score_lbl.setStyleSheet("color: #94A3B8; font-family: monospace; font-size: 12px; border: none; background: transparent;")
+        loc_score_lbl.setAlignment(Qt.AlignRight)
+        self.loc_score_val = QLabel("--%")
+        self.loc_score_val.setFont(QFont("Segoe UI", 28, QFont.Bold))
+        self.loc_score_val.setStyleSheet("color: white; border: none; background: transparent;")
+        self.loc_score_val.setAlignment(Qt.AlignRight)
+        loc_score_vbox.addWidget(loc_score_lbl)
+        loc_score_vbox.addWidget(self.loc_score_val)
+
+        self.score_box.addLayout(cam_score_vbox)
+        self.score_box.addWidget(divider)
+        self.score_box.addLayout(loc_score_vbox)
         
         self.score_container = QWidget()
         self.score_container.setStyleSheet("background: transparent; border: none;")
@@ -525,8 +632,16 @@ class MainWindow(QMainWindow):
             "background-color: #0F172A; border-top: 1px solid #1E293B;",
             "#10B981"
         )
+        
+        # Load local image if exists
+        local_img = None
+        base_path = os.path.join("Image", f"{nat_id}_face")
+        for ext in ['.jpg', '.png', '.jpeg', '.JPG', '.PNG']:
+            if os.path.exists(base_path + ext):
+                local_img = cv2.imread(base_path + ext)
+                break
 
-        self.worker = VerificationWorker(img, self._current_frame, self.config, self.face_verifier, self)
+        self.worker = VerificationWorker(img, self._current_frame, local_img, self.config, self.face_verifier, self)
         self.worker.finished.connect(self._on_verification_done)
         self.worker.error.connect(self._show_error)
         self.worker.start()
@@ -534,25 +649,54 @@ class MainWindow(QMainWindow):
     @pyqtSlot(dict)
     def _on_verification_done(self, result: dict):
         error_msg = result.get("error")
-        is_match = result.get("verified", False)
-        score = result.get("score", 0)
+        score_webcam = result.get("score_webcam", 0)
+        score_local = result.get("score_local")
         elapsed = result.get("elapsed", 0)
         digital_image = result.get("digital_image")
+        local_image = result.get("local_image")
+        has_local = result.get("has_local", False)
         threshold = self.config.get("match_threshold", 0.35)
 
-        if score >= threshold:
-            pct = 85.0 + ((score - threshold) / (1.0 - threshold)) * 15.0
+        # Convert scores to percentages
+        def calc_pct(s):
+            if s is None: return 0.0
+            if s >= threshold:
+                pct = 85.0 + ((s - threshold) / (1.0 - threshold)) * 15.0
+            else:
+                pct = max(0.0, ((s + 0.2) / (threshold + 0.2)) * 84.0)
+            return min(100.0, max(0.0, pct))
+        
+        pct_webcam = calc_pct(score_webcam)
+        pct_local = calc_pct(score_local) if has_local else 0.0
+        
+        self.cam_score_val.setText(f"{pct_webcam:.1f}%")
+        self.cam_score_val.setStyleSheet(f"color: {'#34D399' if score_webcam >= threshold else '#F87171'}; border: none; background: transparent;")
+        
+        if has_local:
+            self.loc_score_val.setText(f"{pct_local:.1f}%")
+            self.loc_score_val.setStyleSheet(f"color: {'#34D399' if score_local >= threshold else '#F87171'}; border: none; background: transparent;")
         else:
-            pct = max(0.0, ((score + 0.2) / (threshold + 0.2)) * 84.0)
-        pct = min(100.0, max(0.0, pct))
-        self.score_val.setText(f"{pct:.1f}%")
+            self.loc_score_val.setText("N/A")
+            self.loc_score_val.setStyleSheet("color: #94A3B8; border: none; background: transparent;")
+
         self.score_container.show()
 
         if digital_image is not None:
             self._display_image(self.digital_label, digital_image)
             self.doc_stack.setCurrentIndex(2)
+            
+        if has_local and local_image is not None:
+            self._display_image(self.local_label, local_image)
+            self.local_stack.setCurrentIndex(2)
+        else:
+            self.lcl_err_text.setText("File Not Found" if not has_local else "Face Not Detected")
+            self.local_stack.setCurrentIndex(1)
+
+        pass_webcam = score_webcam >= threshold
+        pass_local = (score_local >= threshold) if has_local else False
 
         if error_msg:
+            # Fatal error (like web image face missing)
             self._play_feedback_sound("alert")
             self._reticle_color = (68, 68, 239) # Red
             self._set_status(
@@ -561,19 +705,38 @@ class MainWindow(QMainWindow):
                 "background-color: #450A0A; border-top: 1px solid #7F1D1D;",
                 "#F87171"
             )
-            self.score_val.setStyleSheet("color: #F87171; background: transparent; border: none;")
-        elif is_match:
-            if pct < 80.0:
+        elif pass_webcam and (not has_local or pass_local):
+            if pct_webcam < 80.0 or (has_local and pct_local < 80.0):
                 self._play_feedback_sound("warning")
             self._reticle_color = (129, 185, 16) # Emerald
             self._set_status(
-                "MATCH VERIFIED", "Identity confirmed. Proceed to examination room.", "✅",
+                "MATCH VERIFIED", "Identity confirmed across all sources.", "✅",
                 "background-color: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 16px;",
                 "background-color: #022C22; border-top: 1px solid #064E3B;",
                 "#34D399"
             )
-            self.score_val.setStyleSheet("color: #34D399; background: transparent; border: none;")
+        elif not pass_webcam and has_local and pass_local:
+            # Pass only local, but fail webcam
+            self._play_feedback_sound("warning")
+            self._reticle_color = (0, 255, 255) # Yellow mostly
+            self._set_status(
+                "PARTIAL MATCH", "File match verified, but Camera differs.", "⚠️",
+                "background-color: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 16px;",
+                "background-color: #451A03; border-top: 1px solid #78350F;",
+                "#FBBF24"
+            )
+        elif pass_webcam and has_local and not pass_local:
+            # Pass only webcam, but fail local
+            self._play_feedback_sound("warning")
+            self._reticle_color = (0, 255, 255) # Yellow
+            self._set_status(
+                "PARTIAL MATCH", "Camera match verified, but File differs.", "⚠️",
+                "background-color: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 16px;",
+                "background-color: #451A03; border-top: 1px solid #78350F;",
+                "#FBBF24"
+            )
         else:
+            # Both failed, or webcam failed and no root
             self._play_feedback_sound("alert")
             self._reticle_color = (68, 68, 239) # Red
             self._set_status(
@@ -582,7 +745,6 @@ class MainWindow(QMainWindow):
                 "background-color: #450A0A; border-top: 1px solid #7F1D1D;",
                 "#F87171"
             )
-            self.score_val.setStyleSheet("color: #F87171; background: transparent; border: none;")
 
         reset_delay = self.config.get("auto_reset_delay", 3)
         QTimer.singleShot(int(reset_delay * 1000), self._reset_to_standby)
@@ -635,6 +797,7 @@ class MainWindow(QMainWindow):
         self._processing = False
         self._reticle_color = (248, 189, 56) # Sky Blue BGR
         self.doc_stack.setCurrentIndex(0)
+        self.local_stack.setCurrentIndex(0)
         self.score_container.hide()
         self._set_status(
             "READY TO SCAN", "Please scan the QR code to begin verification.", "🔍",
@@ -658,7 +821,7 @@ class MainWindow(QMainWindow):
         bytes_per_line = ch * w
         qt_image = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(qt_image).scaled(
-            self.digital_label.width(), self.digital_label.height(),
+            label.width(), label.height(),
             Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
         label.setPixmap(pixmap)

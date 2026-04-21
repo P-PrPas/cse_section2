@@ -242,33 +242,39 @@ class FaceVerifier:
         new_w, new_h = int(w * scale), int(h * scale)
         return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-    def verify(self, img_digital: np.ndarray, img_webcam: np.ndarray,
+    def verify(self, img_digital: np.ndarray, img_webcam: np.ndarray, img_local: np.ndarray = None,
                threshold: float = 0.40) -> dict:
         """
-        Verify whether two images contain the same person's face.
+        Verify whether images contain the same person's face.
         
-        Detects faces in both images, extracts embeddings, and computes
+        Detects faces in all images, extracts embeddings, and computes
         cosine similarity. Input images are automatically resized if they
         exceed 1024px to prevent memory allocation errors.
         
         Args:
             img_digital: BGR image of the digital original document.
             img_webcam: BGR image captured from webcam.
+            img_local: (Optional) BGR image of the local file database.
             threshold: Cosine similarity threshold. Higher = stricter.
                        Score >= threshold means MATCH.
         
         Returns:
             Dict with:
                 - 'verified': bool
-                - 'score': float (cosine similarity, higher = more similar)
+                - 'score': float (overall score or webcam score)
+                - 'score_webcam': float
+                - 'score_local': float (None if not provided)
                 - 'threshold': float
                 - 'error': str (if face detection failed)
-                - 'img_digital_debug': np.ndarray (image with drawn faces)
-                - 'img_webcam_debug': np.ndarray (image with drawn faces)
+                - 'img_digital_debug': np.ndarray
+                - 'img_webcam_debug': np.ndarray
+                - 'img_local_debug': np.ndarray (None if not provided)
         """
         # Resize images to prevent bad allocation errors in YuNet
         img_digital = self._resize_image(img_digital)
         img_webcam = self._resize_image(img_webcam)
+        if img_local is not None:
+            img_local = self._resize_image(img_local)
 
         # Detect faces in digital original
         faces_digital = self.detect_faces(img_digital)
@@ -277,10 +283,13 @@ class FaceVerifier:
             return {
                 "verified": False,
                 "score": 0.0,
+                "score_webcam": 0.0,
+                "score_local": None,
                 "threshold": threshold,
                 "error": "ไม่พบใบหน้าในเอกสารต้นฉบับ\nNo face detected in the digital original document.",
                 "img_digital_debug": img_digital_debug,
-                "img_webcam_debug": img_webcam.copy()
+                "img_webcam_debug": img_webcam.copy(),
+                "img_local_debug": img_local.copy() if img_local is not None else None
             }
 
         # Detect faces in webcam frame
@@ -296,37 +305,64 @@ class FaceVerifier:
             return {
                 "verified": False,
                 "score": 0.0,
+                "score_webcam": 0.0,
+                "score_local": None,
                 "threshold": threshold,
                 "error": "ไม่พบใบหน้าบนกล้อง กรุณาจัดตำแหน่งใหม่\nNo face detected on camera. Please adjust position.",
                 "img_digital_debug": img_digital_debug,
-                "img_webcam_debug": img_webcam_debug
+                "img_webcam_debug": img_webcam_debug,
+                "img_local_debug": img_local.copy() if img_local is not None else None
             }
 
-        # Take first face from digital, largest from webcam
+        img_local_debug = None
+        face_local = None
+        if img_local is not None:
+            faces_local = self.detect_faces(img_local)
+            face_local = self.get_largest_face(faces_local)
+            img_local_debug = self.draw_debug_faces(img_local, faces_local, color=(0, 255, 255)) # Yellow
+            if face_local is not None:
+                 img_local_debug = self.draw_debug_faces(img_local_debug, np.array([face_local]), color=(0, 255, 0)) # Green
+        
+        # Take first face from digital, largest from webcam, largest from local
         face_digital = faces_digital[0]
 
         # Extract embeddings
         emb_digital = self.extract_embedding(img_digital, face_digital)
         emb_webcam = self.extract_embedding(img_webcam, face_webcam)
+        
+        emb_local = None
+        if face_local is not None:
+            emb_local = self.extract_embedding(img_local, face_local)
 
         # Compute cosine similarity
         with self.lock:
-            score = self.recognizer.match(
+            score_webcam = self.recognizer.match(
                 emb_digital, emb_webcam,
                 cv2.FaceRecognizerSF_FR_COSINE
             )
+            score_local = None
+            if emb_local is not None:
+                score_local = self.recognizer.match(
+                    emb_digital, emb_local,
+                    cv2.FaceRecognizerSF_FR_COSINE
+                )
 
-        is_match = score >= threshold
+        is_match_webcam = score_webcam >= threshold
+        # Overall verification is True if webcam is matched (basic) - the caller will do advanced logic
+        is_match = is_match_webcam
 
         logger.info(
-            "Verification: score=%.4f, threshold=%.4f, match=%s",
-            score, threshold, is_match
+            "Verification: score_webcam=%.4f, score_local=%s, threshold=%.4f",
+            score_webcam, f"{score_local:.4f}" if score_local is not None else "None", threshold
         )
 
         return {
             "verified": is_match,
-            "score": round(float(score), 4),
+            "score": round(float(score_webcam), 4),
+            "score_webcam": round(float(score_webcam), 4),
+            "score_local": round(float(score_local), 4) if score_local is not None else None,
             "threshold": threshold,
             "img_digital_debug": img_digital_debug,
-            "img_webcam_debug": img_webcam_debug
+            "img_webcam_debug": img_webcam_debug,
+            "img_local_debug": img_local_debug
         }
